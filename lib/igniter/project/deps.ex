@@ -263,13 +263,7 @@ defmodule Igniter.Project.Deps do
   def determine_dep_type_and_version(requirement) do
     [package | maybe_version] = String.split(requirement, "@", trim: true, parts: 2)
 
-    {package, repo_opts} =
-      case String.split(package, ":", parts: 2) do
-        [repo, package] -> {package, repo: repo}
-        [package] -> {package, []}
-      end
-
-    {package, org_opts} =
+    {package, opts} =
       case String.split(package, "/", parts: 2) do
         [org, package] -> {package, organization: org}
         [package] -> {package, []}
@@ -277,7 +271,7 @@ defmodule Igniter.Project.Deps do
 
     case maybe_version do
       [] ->
-        with {:ok, version} <- fetch_latest_version(package) do
+        with {:ok, version} <- fetch_latest_version(package, opts) do
           {version, []}
         end
 
@@ -310,7 +304,7 @@ defmodule Igniter.Project.Deps do
     end
     |> case do
       {version, additional_opts} ->
-        to_dependency_spec(package, version, additional_opts ++ repo_opts ++ org_opts)
+        to_dependency_spec(package, version, additional_opts ++ opts)
 
       :error ->
         :error
@@ -323,7 +317,7 @@ defmodule Igniter.Project.Deps do
   defp to_dependency_spec(package, version, opts), do: {String.to_atom(package), version, opts}
 
   defp git_dep_opts(string, kind) do
-    case String.split(string, "@", trim: true) do
+    case String.split(string, "@", trim: true, parts: 2) do
       [git_dep, ref] ->
         [{kind, git_dep}, {:ref, ref}, {:override, true}]
 
@@ -332,14 +326,14 @@ defmodule Igniter.Project.Deps do
     end
   end
 
-  defp fetch_latest_version(package) do
+  defp fetch_latest_version(package, opts) do
     if Regex.match?(~r/^[a-z][a-z0-9_]*$/, package) do
       :inets.start()
       :ssl.start()
-      url = ~c"https://hex.pm/api/packages/#{package}"
 
-      with {:ok, {{_version, _, _reason_phrase}, _headers, body}} <-
-             :httpc.request(:get, {url, [{~c"User-Agent", ~c"igniter-installer"}]}, [], []),
+      with {:ok, url, headers} <- fetch_hex_api_url_and_headers(package, opts),
+           {:ok, {{_version, _, _reason_phrase}, _headers, body}} <-
+             :httpc.request(:get, {url, headers}, [], []),
            {:ok, %{"releases" => releases} = body} <- Jason.decode(body),
            %{"version" => version} <- first_non_rc_version_or_first_version(releases, body) do
         {:ok, Igniter.Util.Version.version_string_to_general_requirement!(version)}
@@ -348,6 +342,27 @@ defmodule Igniter.Project.Deps do
       end
     else
       :error
+    end
+  end
+
+  defp fetch_hex_api_url_and_headers(package, opts) do
+    default_headers = [{~c"User-Agent", ~c"igniter-installer"}]
+
+    case opts[:organization] do
+      nil ->
+        {:ok, ~c"https://hex.pm/api/packages/#{package}", default_headers}
+
+      org ->
+        url = ~c"https://hex.pm/api/repos/#{org}/packages/#{package}"
+        repo_name = "hexpm:#{org}"
+
+        case Hex.State.fetch!(:repos) do
+          %{^repo_name => repo} ->
+            {:ok, url, [{~c"authorization", repo.auth_key}] ++ default_headers}
+
+          _ ->
+            :error
+        end
     end
   end
 
